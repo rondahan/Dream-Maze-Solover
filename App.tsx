@@ -17,6 +17,7 @@ import DreamState from './components/DreamState';
 const App: React.FC = () => {
   const [maze, setMaze] = useState<MazeState | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
   const [curiosityMultiplier, setCuriosityMultiplier] = useState(5);
   const [speed, setSpeed] = useState(1); // Speed multiplier: 1 = normal, higher = faster
   const [latent, setLatent] = useState<LatentVector>({ 
@@ -223,8 +224,9 @@ const App: React.FC = () => {
     }
 
     // V-M loop: Use VAE if enabled, otherwise use random
+    // Optimize: Only encode every few steps to reduce computation
     let newLatent: LatentVector;
-    if (stats.useVAE && vaeRef.current && maze) {
+    if (stats.useVAE && vaeRef.current && maze && stats.steps % 3 === 0) {
       try {
         newLatent = await vaeRef.current.encode(maze);
       } catch (error) {
@@ -236,7 +238,8 @@ const App: React.FC = () => {
         };
       }
     } else {
-      newLatent = {
+      // Reuse previous latent or generate random
+      newLatent = latent || {
         vector: Array(LATENT_DIM).fill(0).map(() => Math.random()),
         reconstruction: Array(5).fill(0).map(() => Array(5).fill(0).map(() => Math.random()))
       };
@@ -253,31 +256,43 @@ const App: React.FC = () => {
     else if (dx > 0) action = 'right';
     lastActionRef.current = action;
 
-    // Occasional "Dream" analysis
-    if (stats.steps % 5 === 0) {
-      let d: DreamPrediction;
-      if (stats.useMDNRNN && mdnRnnRef.current && lastActionRef.current) {
-        try {
-          // Predict sequence using MDN-RNN
-          const actions: ('up' | 'down' | 'left' | 'right')[] = [
-            lastActionRef.current, lastActionRef.current, lastActionRef.current, 
-            lastActionRef.current, lastActionRef.current
-          ];
-          d = await mdnRnnRef.current.predictSequence(newLatent.vector, actions, maze);
-        } catch (error) {
-          console.error('MDN-RNN prediction error:', error);
-          // Fallback to simple prediction
+    // Occasional "Dream" analysis - optimize: reduce frequency and make non-blocking
+    if (stats.steps % 10 === 0) {
+      // Run dream analysis asynchronously without blocking the main step
+      Promise.resolve().then(async () => {
+        let d: DreamPrediction;
+        if (stats.useMDNRNN && mdnRnnRef.current && lastActionRef.current) {
+          try {
+            // Predict sequence using MDN-RNN
+            const actions: ('up' | 'down' | 'left' | 'right')[] = [
+              lastActionRef.current, lastActionRef.current, lastActionRef.current, 
+              lastActionRef.current, lastActionRef.current
+            ];
+            d = await mdnRnnRef.current.predictSequence(newLatent.vector, actions, maze);
+          } catch (error) {
+            console.error('MDN-RNN prediction error:', error);
+            // Fallback to simple prediction
+            d = await predictNextState(maze);
+          }
+        } else {
           d = await predictNextState(maze);
         }
-      } else {
-        d = await predictNextState(maze);
-      }
-      setDream(d);
-      const m = await getAgentInternalMonologue(maze);
-      setMonologue(m);
-      if (mode === 'explore') {
-        addLog(`Internal State: Novelty seeking (ε=${epsilon.toFixed(2)}, Curiosity x${curiosityMultiplier}).`, "dream");
-      }
+        setDream(d);
+        // Only update monologue occasionally to reduce API calls
+        if (stats.steps % 20 === 0) {
+          try {
+            const m = await getAgentInternalMonologue(maze);
+            setMonologue(m);
+          } catch (error) {
+            console.error('Monologue error:', error);
+          }
+        }
+        if (mode === 'explore') {
+          addLog(`Internal State: Novelty seeking (ε=${epsilon.toFixed(2)}, Curiosity x${curiosityMultiplier}).`, "dream");
+        }
+      }).catch(error => {
+        console.error('Dream analysis error:', error);
+      });
     }
 
     if (isNewArea && !reachedGoal) {
@@ -286,10 +301,17 @@ const App: React.FC = () => {
 
     setMaze(prev => {
       if (!prev) return null;
+      // Optimize: Limit history size to prevent memory growth
+      const newHistory = [...prev.history, nextPos];
+      const maxHistorySize = MAZE_SIZE * MAZE_SIZE; // Limit to maze area
+      const trimmedHistory = newHistory.length > maxHistorySize 
+        ? newHistory.slice(-maxHistorySize)
+        : newHistory;
+      
       return {
         ...prev,
         agentPos: nextPos,
-        history: [...prev.history, nextPos]
+        history: trimmedHistory
       };
     });
 
@@ -373,38 +395,70 @@ const App: React.FC = () => {
     };
   }, [isRunning, step, stats.goalReached, speed]);
 
-  // Initialize all neural networks
+  // Initialize all neural networks asynchronously to avoid blocking UI
   useEffect(() => {
+    let cancelled = false;
+    
     const initNetworks = async () => {
-      // Initialize Policy Network
-      policyNetworkRef.current = new PolicyNetwork();
-      await policyNetworkRef.current.initialize();
-      addLog("Neural Network Policy initialized. Ready for learning.", "action");
+      setIsInitializing(true);
       
-      // Initialize VAE
-      if (stats.useVAE) {
-        vaeRef.current = new VAE();
-        await vaeRef.current.initialize();
-        addLog("VAE (Vision) initialized. Encoding maze states.", "vision");
+      try {
+        // Initialize Policy Network
+        policyNetworkRef.current = new PolicyNetwork();
+        await policyNetworkRef.current.initialize();
+        if (!cancelled) {
+          addLog("Neural Network Policy initialized. Ready for learning.", "action");
+        }
+        
+        // Allow UI to update between initializations
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
+        // Initialize VAE
+        if (stats.useVAE && !cancelled) {
+          vaeRef.current = new VAE();
+          await vaeRef.current.initialize();
+          if (!cancelled) {
+            addLog("VAE (Vision) initialized. Encoding maze states.", "vision");
+          }
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        
+        // Initialize MDN-RNN
+        if (stats.useMDNRNN && !cancelled) {
+          mdnRnnRef.current = new MDNRNN();
+          await mdnRnnRef.current.initialize();
+          if (!cancelled) {
+            addLog("MDN-RNN (Memory) initialized. Ready for dreaming.", "dream");
+          }
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        
+        // Initialize Training System
+        if (!cancelled) {
+          trainingSystemRef.current = new TrainingSystem(10000, 32);
+          addLog("Training System initialized. Experience replay enabled.", "action");
+        }
+        
+        // Initialize Knowledge Base for transfer learning
+        if (!cancelled) {
+          knowledgeBaseRef.current = TransferLearning.createKnowledgeBase();
+        }
+        
+        if (!cancelled) {
+          setIsInitializing(false);
+        }
+      } catch (error) {
+        console.error('Network initialization error:', error);
+        if (!cancelled) {
+          setIsInitializing(false);
+        }
       }
-      
-      // Initialize MDN-RNN
-      if (stats.useMDNRNN) {
-        mdnRnnRef.current = new MDNRNN();
-        await mdnRnnRef.current.initialize();
-        addLog("MDN-RNN (Memory) initialized. Ready for dreaming.", "dream");
-      }
-      
-      // Initialize Training System
-      trainingSystemRef.current = new TrainingSystem(10000, 32);
-      addLog("Training System initialized. Experience replay enabled.", "action");
-      
-      // Initialize Knowledge Base for transfer learning
-      knowledgeBaseRef.current = TransferLearning.createKnowledgeBase();
     };
+    
     initNetworks();
 
     return () => {
+      cancelled = true;
       if (policyNetworkRef.current) {
         policyNetworkRef.current.dispose();
       }
@@ -470,15 +524,17 @@ const App: React.FC = () => {
 
           <button 
             onClick={() => setIsRunning(!isRunning)}
-            disabled={stats.goalReached}
+            disabled={stats.goalReached || isInitializing}
             className={`px-8 py-3 rounded-full font-bold transition-all duration-300 flex items-center gap-3 ${
               isRunning 
                 ? 'bg-red-500/10 text-red-400 border border-red-500/50 hover:bg-red-500/20' 
+                : isInitializing
+                ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
                 : 'bg-blue-600 text-white hover:bg-blue-500 shadow-[0_0_20px_rgba(37,99,235,0.4)]'
             }`}
           >
             {isRunning ? <i className="fa-solid fa-pause"></i> : <i className="fa-solid fa-play"></i>}
-            {isRunning ? 'HALT PROCESS' : 'START SIMULATION'}
+            {isInitializing ? 'INITIALIZING...' : isRunning ? 'HALT PROCESS' : 'START SIMULATION'}
           </button>
           
           <button 
@@ -557,7 +613,14 @@ const App: React.FC = () => {
 
         {/* Center Column: The Maze */}
         <div className="lg:col-span-6 flex flex-col items-center">
-          {maze && <MazeBoard maze={maze} />}
+          {isInitializing ? (
+            <div className="flex flex-col items-center justify-center h-96 bg-slate-900 border-2 border-slate-700 rounded-lg">
+              <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+              <p className="text-slate-400 text-sm">Initializing neural networks...</p>
+            </div>
+          ) : maze ? (
+            <MazeBoard maze={maze} />
+          ) : null}
           
           <div className="w-full grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
             <div className="bg-slate-900/50 p-4 border border-slate-800 rounded-xl text-center">

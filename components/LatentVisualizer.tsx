@@ -6,7 +6,7 @@ interface Props {
   latent: LatentVector;
 }
 
-const LatentVisualizer: React.FC<Props> = ({ latent }) => {
+const LatentVisualizer: React.FC<Props> = React.memo(({ latent }) => {
   return (
     <div className="bg-slate-900 p-4 border border-slate-700 rounded-xl h-full">
       <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
@@ -40,6 +40,8 @@ const LatentVisualizer: React.FC<Props> = ({ latent }) => {
       </div>
     </div>
   );
-};
+});
+
+LatentVisualizer.displayName = 'LatentVisualizer';
 
 export default LatentVisualizer;

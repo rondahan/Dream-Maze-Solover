@@ -7,7 +7,7 @@ interface Props {
   monologue: string;
 }
 
-const DreamState: React.FC<Props> = ({ dream, monologue }) => {
+const DreamState: React.FC<Props> = React.memo(({ dream, monologue }) => {
   return (
     <div className="bg-slate-900 p-4 border border-slate-700 rounded-xl h-full flex flex-col">
       <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
@@ -41,6 +41,8 @@ const DreamState: React.FC<Props> = ({ dream, monologue }) => {
       </div>
     </div>
   );
-};
+});
+
+DreamState.displayName = 'DreamState';
 
 export default DreamState;
