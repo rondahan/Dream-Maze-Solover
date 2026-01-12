@@ -396,6 +396,7 @@ const App: React.FC = () => {
   }, [isRunning, step, stats.goalReached, speed]);
 
   // Initialize all neural networks asynchronously to avoid blocking UI
+  // Use requestIdleCallback for better performance and lazy loading
   useEffect(() => {
     let cancelled = false;
     
@@ -403,47 +404,94 @@ const App: React.FC = () => {
       setIsInitializing(true);
       
       try {
-        // Initialize Policy Network
+        // Initialize Policy Network first (smallest, most important)
         policyNetworkRef.current = new PolicyNetwork();
         await policyNetworkRef.current.initialize();
         if (!cancelled) {
           addLog("Neural Network Policy initialized. Ready for learning.", "action");
         }
         
-        // Allow UI to update between initializations
-        await new Promise(resolve => setTimeout(resolve, 50));
-        
-        // Initialize VAE
-        if (stats.useVAE && !cancelled) {
-          vaeRef.current = new VAE();
-          await vaeRef.current.initialize();
-          if (!cancelled) {
-            addLog("VAE (Vision) initialized. Encoding maze states.", "vision");
-          }
-          await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        
-        // Initialize MDN-RNN
-        if (stats.useMDNRNN && !cancelled) {
-          mdnRnnRef.current = new MDNRNN();
-          await mdnRnnRef.current.initialize();
-          if (!cancelled) {
-            addLog("MDN-RNN (Memory) initialized. Ready for dreaming.", "dream");
-          }
-          await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        
-        // Initialize Training System
+        // Initialize Training System (lightweight, no TensorFlow)
         if (!cancelled) {
           trainingSystemRef.current = new TrainingSystem(10000, 32);
           addLog("Training System initialized. Experience replay enabled.", "action");
         }
         
-        // Initialize Knowledge Base for transfer learning
+        // Initialize Knowledge Base (lightweight)
         if (!cancelled) {
           knowledgeBaseRef.current = TransferLearning.createKnowledgeBase();
         }
         
+        // Allow UI to render before loading heavy networks
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Initialize VAE lazily - only if enabled
+        // Load in background after UI is ready, with timeout protection
+        if (stats.useVAE && !cancelled) {
+          const initVAE = async () => {
+            try {
+              vaeRef.current = new VAE();
+              // Add timeout protection
+              const initPromise = vaeRef.current.initialize();
+              const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('VAE initialization timeout')), 10000)
+              );
+              
+              await Promise.race([initPromise, timeoutPromise]);
+              
+              if (!cancelled) {
+                addLog("VAE (Vision) initialized. Encoding maze states.", "vision");
+              }
+            } catch (error) {
+              console.warn('VAE initialization failed or timed out:', error);
+              if (!cancelled) {
+                addLog("VAE initialization skipped (will use fallback).", "vision");
+              }
+            }
+          };
+          
+          // Load after a delay to let UI render first
+          setTimeout(() => {
+            if (!cancelled) {
+              initVAE();
+            }
+          }, 500);
+        }
+        
+        // Initialize MDN-RNN lazily - only if enabled
+        // Load in background after VAE, with timeout protection
+        if (stats.useMDNRNN && !cancelled) {
+          const initMDNRNN = async () => {
+            try {
+              mdnRnnRef.current = new MDNRNN();
+              // Add timeout protection
+              const initPromise = mdnRnnRef.current.initialize();
+              const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('MDN-RNN initialization timeout')), 15000)
+              );
+              
+              await Promise.race([initPromise, timeoutPromise]);
+              
+              if (!cancelled) {
+                addLog("MDN-RNN (Memory) initialized. Ready for dreaming.", "dream");
+              }
+            } catch (error) {
+              console.warn('MDN-RNN initialization failed or timed out:', error);
+              if (!cancelled) {
+                addLog("MDN-RNN initialization skipped (will use fallback).", "dream");
+              }
+            }
+          };
+          
+          // Load after VAE starts loading
+          setTimeout(() => {
+            if (!cancelled) {
+              initMDNRNN();
+            }
+          }, 1000);
+        }
+        
+        // Mark as ready after Policy Network (most critical)
         if (!cancelled) {
           setIsInitializing(false);
         }
@@ -455,7 +503,15 @@ const App: React.FC = () => {
       }
     };
     
-    initNetworks();
+    // Use requestIdleCallback for non-blocking initialization
+    if ('requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(() => {
+        initNetworks();
+      }, { timeout: 1000 });
+    } else {
+      // Fallback for browsers without requestIdleCallback
+      setTimeout(initNetworks, 0);
+    }
 
     return () => {
       cancelled = true;

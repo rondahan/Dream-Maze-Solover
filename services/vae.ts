@@ -25,7 +25,7 @@ export class VAE {
     // Encoder: Converts maze grid to latent space
     const encoderInput = tf.input({ shape: [MAZE_SIZE, MAZE_SIZE, 1] });
     
-    // CNN layers for encoding
+    // CNN layers for encoding - Original size for better encoding quality
     let x = tf.layers.conv2d({
       filters: 16,
       kernelSize: 3,
@@ -247,7 +247,9 @@ export class VAE {
         
         const totalLoss = tf.add(reconstructionLoss, klLoss);
         
-        optimizer.minimize(() => totalLoss);
+        optimizer.minimize(() => {
+          return totalLoss.mean() as tf.Scalar;
+        });
         
         // Cleanup
         mazeTensor.dispose();

@@ -27,6 +27,7 @@ export class MDNRNN {
     const input = tf.input({ shape: [null, LATENT_DIM + 4] }); // [batch, timesteps, features]
     
     // LSTM layers for temporal prediction
+    // Using original size for better prediction quality
     const lstm1 = tf.layers.lstm({
       units: 256,
       returnSequences: true,
@@ -91,7 +92,7 @@ export class MDNRNN {
     const input = [...currentLatent, ...actionEncoding];
     
     // Reshape for LSTM: [batch=1, timesteps=1, features=12]
-    const inputTensor = tf.tensor3d([input], [1, 1, LATENT_DIM + 4]);
+    const inputTensor = tf.tensor3d([[input]], [1, 1, LATENT_DIM + 4]);
     
     const [prediction, h1, c1, h2, c2] = this.model.predict(inputTensor) as tf.Tensor[];
     
@@ -196,10 +197,14 @@ export class MDNRNN {
           // Take last timestep prediction
           const lastPred = tf.slice(prediction, [0, prediction.shape[1] - 1, 0], [-1, 1, -1]);
           const squeezed = tf.squeeze(lastPred, [1]);
-          return tf.losses.meanSquaredError(targetTensor, squeezed);
+          const lossValue = tf.losses.meanSquaredError(targetTensor, squeezed);
+          return lossValue;
         };
 
-        optimizer.minimize(loss);
+        optimizer.minimize(() => {
+          const lossValue = loss();
+          return lossValue as tf.Scalar;
+        });
 
         inputTensor.dispose();
         targetTensor.dispose();
