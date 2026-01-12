@@ -1,4 +1,5 @@
-import * as tf from '@tensorflow/tfjs';
+import type * as tf from '@tensorflow/tfjs';
+import { loadTensorFlow } from '../utils/tfLoader';
 import { MazeState, LatentVector } from '../types';
 import { MAZE_SIZE, LATENT_DIM } from '../constants';
 
@@ -11,6 +12,7 @@ export class VAE {
   private encoder: tf.LayersModel | null = null;
   private decoder: tf.LayersModel | null = null;
   private isInitialized = false;
+  private tf: typeof import('@tensorflow/tfjs') | null = null;
 
   constructor() {}
 
@@ -21,6 +23,10 @@ export class VAE {
    */
   async initialize() {
     if (this.isInitialized) return;
+
+    // Lazy load TensorFlow.js
+    this.tf = await loadTensorFlow();
+    const tf = this.tf;
 
     // Encoder: Converts maze grid to latent space
     const encoderInput = tf.input({ shape: [MAZE_SIZE, MAZE_SIZE, 1] });
@@ -108,6 +114,10 @@ export class VAE {
    * Convert maze grid to tensor
    */
   private mazeToTensor(mazeState: MazeState): tf.Tensor {
+    if (!this.tf) {
+      throw new Error('TensorFlow not loaded. Call initialize() first.');
+    }
+    const tf = this.tf;
     const { grid } = mazeState;
     const data: number[] = [];
     
@@ -126,7 +136,7 @@ export class VAE {
    * Encode maze state to latent vector
    */
   async encode(mazeState: MazeState): Promise<LatentVector> {
-    if (!this.encoder || !this.isInitialized) {
+    if (!this.encoder || !this.isInitialized || !this.tf) {
       await this.initialize();
     }
 
@@ -164,9 +174,10 @@ export class VAE {
    * Decode latent vector to reconstructed grid
    */
   async decode(latentVector: number[]): Promise<number[][]> {
-    if (!this.decoder || !this.isInitialized) {
+    if (!this.decoder || !this.isInitialized || !this.tf) {
       await this.initialize();
     }
+    const tf = this.tf!;
 
     const latentTensor = tf.tensor2d([latentVector]);
     const reconstruction = this.decoder.predict(latentTensor) as tf.Tensor;
@@ -198,9 +209,10 @@ export class VAE {
    * Train VAE on maze states
    */
   async train(mazeStates: MazeState[], epochs: number = 5) {
-    if (!this.encoder || !this.decoder || !this.isInitialized) {
+    if (!this.encoder || !this.decoder || !this.isInitialized || !this.tf) {
       await this.initialize();
     }
+    const tf = this.tf!;
 
     const optimizer = tf.train.adam(0.001);
     

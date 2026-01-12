@@ -1,4 +1,5 @@
-import * as tf from '@tensorflow/tfjs';
+import type * as tf from '@tensorflow/tfjs';
+import { loadTensorFlow } from '../utils/tfLoader';
 import { MazeState, Position, DreamPrediction } from '../types';
 import { LATENT_DIM } from '../constants';
 
@@ -12,6 +13,7 @@ export class MDNRNN {
   private isInitialized = false;
   private hiddenState: tf.Tensor | null = null;
   private cellState: tf.Tensor | null = null;
+  private tf: typeof import('@tensorflow/tfjs') | null = null;
 
   constructor() {}
 
@@ -22,6 +24,10 @@ export class MDNRNN {
    */
   async initialize() {
     if (this.isInitialized) return;
+
+    // Lazy load TensorFlow.js
+    this.tf = await loadTensorFlow();
+    const tf = this.tf;
 
     // Input: latent vector (8) + action encoding (4) = 12 dimensions
     const input = tf.input({ shape: [null, LATENT_DIM + 4] }); // [batch, timesteps, features]
@@ -84,9 +90,10 @@ export class MDNRNN {
     currentLatent: number[],
     action: 'up' | 'down' | 'left' | 'right'
   ): Promise<number[]> {
-    if (!this.model || !this.isInitialized) {
+    if (!this.model || !this.isInitialized || !this.tf) {
       await this.initialize();
     }
+    const tf = this.tf!;
 
     const actionEncoding = this.encodeAction(action);
     const input = [...currentLatent, ...actionEncoding];
@@ -122,7 +129,7 @@ export class MDNRNN {
     actions: ('up' | 'down' | 'left' | 'right')[],
     mazeState: MazeState
   ): Promise<DreamPrediction> {
-    if (!this.model || !this.isInitialized) {
+    if (!this.model || !this.isInitialized || !this.tf) {
       await this.initialize();
     }
 
@@ -168,9 +175,10 @@ export class MDNRNN {
     }[]>,
     epochs: number = 5
   ) {
-    if (!this.model || !this.isInitialized) {
+    if (!this.model || !this.isInitialized || !this.tf) {
       await this.initialize();
     }
+    const tf = this.tf!;
 
     const optimizer = tf.train.adam(0.001);
 
@@ -216,6 +224,8 @@ export class MDNRNN {
    * Reset hidden states
    */
   resetStates() {
+    if (!this.tf) return;
+    const tf = this.tf;
     this.hiddenState?.dispose();
     this.cellState?.dispose();
     this.hiddenState = tf.zeros([1, 128]);

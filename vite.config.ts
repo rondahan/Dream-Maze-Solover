@@ -16,11 +16,20 @@ export default defineConfig(({ mode }) => {
         }
       },
       optimizeDeps: {
-        include: ['@tensorflow/tfjs']
+        // Don't pre-bundle TensorFlow - let it load lazily
+        exclude: ['@tensorflow/tfjs']
       },
       build: {
         commonjsOptions: {
           include: [/node_modules/]
+        },
+        rollupOptions: {
+          output: {
+            // Code splitting for better loading performance
+            manualChunks: {
+              'tensorflow': ['@tensorflow/tfjs']
+            }
+          }
         }
       },
       // Vite automatically exposes env variables prefixed with VITE_ to import.meta.env

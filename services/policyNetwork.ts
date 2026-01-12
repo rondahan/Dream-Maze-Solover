@@ -1,4 +1,5 @@
-import * as tf from '@tensorflow/tfjs';
+import type * as tf from '@tensorflow/tfjs';
+import { loadTensorFlow } from '../utils/tfLoader';
 import { MazeState, Position } from '../types';
 import { MAZE_SIZE } from '../constants';
 
@@ -9,12 +10,13 @@ import { MAZE_SIZE } from '../constants';
  */
 export class PolicyNetwork {
   private model: tf.Sequential | null = null;
-  private optimizer: tf.Optimizer;
+  private optimizer: tf.Optimizer | null = null;
   private isInitialized = false;
+  private tf: typeof import('@tensorflow/tfjs') | null = null;
 
   constructor() {
-    // Use Adam optimizer for training
-    this.optimizer = tf.train.adam(0.001);
+    // Optimizer will be created after TensorFlow loads
+    // No initialization here to avoid blocking
   }
 
   /**
@@ -23,6 +25,13 @@ export class PolicyNetwork {
    */
   async initialize() {
     if (this.isInitialized) return;
+
+    // Lazy load TensorFlow.js
+    this.tf = await loadTensorFlow();
+    const tf = this.tf;
+
+    // Create optimizer after TensorFlow is loaded
+    this.optimizer = tf.train.adam(0.001);
 
     this.model = tf.sequential({
       layers: [
@@ -100,14 +109,15 @@ export class PolicyNetwork {
     currentSteps: number,
     curiosityWeight: number
   ): Promise<number[]> {
-    if (!this.model || !this.isInitialized) {
+    if (!this.model || !this.isInitialized || !this.tf) {
       await this.initialize();
     }
+    const tf = this.tf!;
 
     const features = this.stateToFeatures(mazeState, currentSteps, curiosityWeight);
     const input = tf.tensor2d([features]);
     
-    const prediction = this.model.predict(input) as tf.Tensor;
+    const prediction = this.model!.predict(input) as tf.Tensor;
     const probabilities = await prediction.data();
     
     input.dispose();
@@ -197,7 +207,8 @@ export class PolicyNetwork {
     rewards: number[],
     learningRate: number = 0.001
   ) {
-    if (!this.model || !this.isInitialized) return;
+    if (!this.model || !this.isInitialized || !this.tf || !this.optimizer) return;
+    const tf = this.tf;
 
     // Convert to tensors
     const statesTensor = tf.tensor2d(states);
@@ -214,12 +225,12 @@ export class PolicyNetwork {
       const actionProbs = tf.gather(predictions, actionsTensor, 1);
       const logProbs = tf.log(tf.add(actionProbs, 1e-8)); // Add small epsilon to avoid log(0)
       const weightedLogProbs = tf.mul(logProbs, normalizedRewards);
-      return tf.neg(tf.mean(weightedLogProbs)); // Negative because we want to maximize
+      return tf.neg(tf.mean(weightedLogProbs)).asScalar(); // Negative because we want to maximize, ensure Scalar
     };
 
     // Train for a few steps
     for (let i = 0; i < 3; i++) {
-      this.optimizer.minimize(loss);
+      this.optimizer!.minimize(loss);
     }
 
     // Cleanup
@@ -243,7 +254,12 @@ export class PolicyNetwork {
    */
   getSummary(): string {
     if (!this.model) return 'Not initialized';
-    return this.model.summary();
+    try {
+      this.model.summary();
+      return 'Model initialized';
+    } catch {
+      return 'Model initialized (summary unavailable)';
+    }
   }
 
   /**

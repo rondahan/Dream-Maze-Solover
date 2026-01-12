@@ -404,26 +404,46 @@ const App: React.FC = () => {
       setIsInitializing(true);
       
       try {
-        // Initialize Policy Network first (smallest, most important)
-        policyNetworkRef.current = new PolicyNetwork();
-        await policyNetworkRef.current.initialize();
-        if (!cancelled) {
-          addLog("Neural Network Policy initialized. Ready for learning.", "action");
-        }
-        
-        // Initialize Training System (lightweight, no TensorFlow)
+        // Initialize lightweight systems first (no TensorFlow)
         if (!cancelled) {
           trainingSystemRef.current = new TrainingSystem(10000, 32);
           addLog("Training System initialized. Experience replay enabled.", "action");
         }
         
-        // Initialize Knowledge Base (lightweight)
         if (!cancelled) {
           knowledgeBaseRef.current = TransferLearning.createKnowledgeBase();
         }
         
-        // Allow UI to render before loading heavy networks
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Mark UI as ready immediately - don't wait for TensorFlow
+        // This allows the user to see the interface and start interacting
+        if (!cancelled) {
+          setIsInitializing(false);
+          addLog("UI ready. Loading neural networks in background...", "action");
+        }
+        
+        // Initialize Policy Network in background (requires TensorFlow)
+        // This will lazy-load TensorFlow.js when needed
+        const initPolicyNetwork = async () => {
+          try {
+            policyNetworkRef.current = new PolicyNetwork();
+            await policyNetworkRef.current.initialize();
+            if (!cancelled) {
+              addLog("Neural Network Policy initialized. Ready for learning.", "action");
+            }
+          } catch (error) {
+            console.warn('Policy Network initialization failed:', error);
+            if (!cancelled) {
+              addLog("Policy Network initialization failed (will use epsilon-greedy).", "action");
+            }
+          }
+        };
+        
+        // Start loading Policy Network after a short delay
+        setTimeout(() => {
+          if (!cancelled) {
+            initPolicyNetwork();
+          }
+        }, 200);
         
         // Initialize VAE lazily - only if enabled
         // Load in background after UI is ready, with timeout protection
@@ -434,7 +454,7 @@ const App: React.FC = () => {
               // Add timeout protection
               const initPromise = vaeRef.current.initialize();
               const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('VAE initialization timeout')), 10000)
+                setTimeout(() => reject(new Error('VAE initialization timeout')), 15000)
               );
               
               await Promise.race([initPromise, timeoutPromise]);
@@ -450,12 +470,12 @@ const App: React.FC = () => {
             }
           };
           
-          // Load after a delay to let UI render first
+          // Load after a longer delay to let Policy Network load first
           setTimeout(() => {
             if (!cancelled) {
               initVAE();
             }
-          }, 500);
+          }, 1000);
         }
         
         // Initialize MDN-RNN lazily - only if enabled
@@ -467,7 +487,7 @@ const App: React.FC = () => {
               // Add timeout protection
               const initPromise = mdnRnnRef.current.initialize();
               const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('MDN-RNN initialization timeout')), 15000)
+                setTimeout(() => reject(new Error('MDN-RNN initialization timeout')), 20000)
               );
               
               await Promise.race([initPromise, timeoutPromise]);
@@ -488,12 +508,7 @@ const App: React.FC = () => {
             if (!cancelled) {
               initMDNRNN();
             }
-          }, 1000);
-        }
-        
-        // Mark as ready after Policy Network (most critical)
-        if (!cancelled) {
-          setIsInitializing(false);
+          }, 2000);
         }
       } catch (error) {
         console.error('Network initialization error:', error);
@@ -504,13 +519,14 @@ const App: React.FC = () => {
     };
     
     // Use requestIdleCallback for non-blocking initialization
+    // But with a shorter timeout so UI appears faster
     if ('requestIdleCallback' in window) {
       (window as any).requestIdleCallback(() => {
         initNetworks();
-      }, { timeout: 1000 });
+      }, { timeout: 100 });
     } else {
       // Fallback for browsers without requestIdleCallback
-      setTimeout(initNetworks, 0);
+      setTimeout(initNetworks, 50);
     }
 
     return () => {

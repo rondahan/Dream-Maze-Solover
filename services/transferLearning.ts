@@ -1,4 +1,5 @@
-import * as tf from '@tensorflow/tfjs';
+import type * as tf from '@tensorflow/tfjs';
+import { loadTensorFlow } from '../utils/tfLoader';
 import { PolicyNetwork } from './policyNetwork';
 import { VAE } from './vae';
 import { MDNRNN } from './mdnRnn';
