@@ -1,0 +1,5 @@
+{
+  "name": "The Dreaming Maze Solver",
+  "description": "An interactive AI agent simulator based on the World Models (V-M-C) architecture, capable of procedurally generating mazes and visualizing internal 'dreams' and 'vision' latent states.",
+  "requestFramePermissions": []
+}
