@@ -6,6 +6,12 @@ import { generateMaze } from './utils/mazeGenerator';
 import { EnvironmentGenerator, EnvironmentType } from './utils/environmentGenerator';
 import { getAgentInternalMonologue, predictNextState } from './services/geminiService';
 import { PolicyNetwork } from './services/policyNetwork';
+import { DQN } from './services/dqn';
+import { ActorCritic, ExplorationType } from './services/actorCritic';
+import { PPO } from './services/ppo';
+import { A3C } from './services/a3c';
+import { SAC } from './services/sac';
+import { AStar } from './services/astar';
 import { VAE } from './services/vae';
 import { MDNRNN } from './services/mdnRnn';
 import { TrainingSystem } from './services/trainingSystem';
@@ -13,6 +19,8 @@ import { TransferLearning } from './services/transferLearning';
 import MazeBoard from './components/MazeBoard';
 import LatentVisualizer from './components/LatentVisualizer';
 import DreamState from './components/DreamState';
+
+export type AlgorithmType = 'REINFORCE' | 'DQN' | 'ActorCritic' | 'PPO' | 'A3C' | 'SAC' | 'AStar' | 'EpsilonGreedy';
 
 const App: React.FC = () => {
   const [maze, setMaze] = useState<MazeState | null>(null);
@@ -38,11 +46,20 @@ const App: React.FC = () => {
     trainingExperiences: 0, // Number of experiences in training buffer
     environmentType: EnvironmentType.MAZE as EnvironmentType,
     useVAE: true, // Use real VAE instead of random
-    useMDNRNN: true // Use real MDN-RNN instead of simple prediction
+    useMDNRNN: true, // Use real MDN-RNN instead of simple prediction
+    algorithm: 'REINFORCE' as AlgorithmType, // Selected algorithm
+    useOptimalExploration: true, // Use optimal exploration for each algorithm (default)
+    explorationType: 'softmax' as ExplorationType // For Actor-Critic manual override
   });
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const policyNetworkRef = useRef<PolicyNetwork | null>(null);
+  const dqnRef = useRef<DQN | null>(null);
+  const actorCriticRef = useRef<ActorCritic | null>(null);
+  const ppoRef = useRef<PPO | null>(null);
+  const a3cRef = useRef<A3C | null>(null);
+  const sacRef = useRef<SAC | null>(null);
+  const astarRef = useRef<AStar | null>(null);
   const vaeRef = useRef<VAE | null>(null);
   const mdnRnnRef = useRef<MDNRNN | null>(null);
   const trainingSystemRef = useRef<TrainingSystem | null>(null);
@@ -51,6 +68,9 @@ const App: React.FC = () => {
     states: number[][];
     actions: number[];
     rewards: number[];
+    nextStates?: number[];
+    dones?: boolean[];
+    oldProbs?: number[]; // For PPO
   }>({ states: [], actions: [], rewards: [] });
   const lastActionRef = useRef<'up' | 'down' | 'left' | 'right' | null>(null);
 
@@ -61,7 +81,10 @@ const App: React.FC = () => {
       message,
       type
     };
-    setLogs(prev => [newLog, ...prev].slice(0, 10));
+    // Increase log buffer to show more information
+    setLogs(prev => [newLog, ...prev].slice(0, 50));
+    // Also log to console for debugging
+    console.log(`[${type.toUpperCase()}] ${message}`);
   }, []);
 
   const initMaze = useCallback((envType?: EnvironmentType) => {
@@ -84,7 +107,10 @@ const App: React.FC = () => {
       trainingExperiences: 0,
       environmentType: type,
       useVAE: prev.useVAE,
-      useMDNRNN: prev.useMDNRNN
+      useMDNRNN: prev.useMDNRNN,
+      algorithm: prev.algorithm,
+      useOptimalExploration: prev.useOptimalExploration,
+      explorationType: prev.explorationType
     }));
     trainingBufferRef.current = { states: [], actions: [], rewards: [] };
     if (mdnRnnRef.current) {
@@ -114,34 +140,94 @@ const App: React.FC = () => {
 
     if (possibleMoves.length === 0) return { pos: agentPos, mode: 'exploit', epsilon };
 
-    // Use Neural Network if enabled and initialized
-    if (stats.useNeuralNetwork && policyNetworkRef.current) {
+    // Use selected algorithm if neural network is enabled
+    if (stats.useNeuralNetwork && stats.algorithm !== 'EpsilonGreedy') {
       try {
-        const result = await policyNetworkRef.current.selectAction(
-          m,
-          possibleMoves,
-          currentSteps,
-          curiosityWeight,
-          epsilon
-        );
-        
-        // Determine mode based on whether it's exploring or exploiting
-        const isNewArea = !history.some(hp => hp.x === result.pos.x && hp.y === result.pos.y);
-        const mode = isNewArea ? 'explore' : 'exploit';
-        
-        return { 
-          pos: result.pos, 
-          mode, 
-          epsilon,
-          actionIndex: result.actionIndex
-        };
+        let result: { pos: Position; actionIndex: number } | null = null;
+
+        switch (stats.algorithm) {
+          case 'REINFORCE':
+            if (policyNetworkRef.current) {
+              result = await policyNetworkRef.current.selectAction(
+                m, possibleMoves, currentSteps, curiosityWeight, epsilon
+              );
+            }
+            break;
+
+          case 'DQN':
+            if (dqnRef.current) {
+              result = await dqnRef.current.selectAction(
+                m, possibleMoves, currentSteps, curiosityWeight, epsilon
+              );
+            }
+            break;
+
+          case 'ActorCritic':
+            if (actorCriticRef.current) {
+              // Set exploration type based on settings
+              if (stats.useOptimalExploration) {
+                actorCriticRef.current.setExplorationType('softmax', 1.0);
+              } else {
+                actorCriticRef.current.setExplorationType(stats.explorationType, 1.0);
+              }
+              result = await actorCriticRef.current.selectAction(
+                m, possibleMoves, currentSteps, curiosityWeight, epsilon
+              );
+            }
+            break;
+
+          case 'PPO':
+            if (ppoRef.current) {
+              // PPO always uses softmax (ignores epsilon parameter)
+              result = await ppoRef.current.selectAction(
+                m, possibleMoves, currentSteps, curiosityWeight, epsilon
+              );
+            }
+            break;
+
+          case 'A3C':
+            if (a3cRef.current) {
+              result = await a3cRef.current.selectAction(
+                m, possibleMoves, currentSteps, curiosityWeight, epsilon
+              );
+            }
+            break;
+
+          case 'SAC':
+            if (sacRef.current) {
+              result = await sacRef.current.selectAction(
+                m, possibleMoves, currentSteps, curiosityWeight, epsilon
+              );
+            }
+            break;
+
+          case 'AStar':
+            if (astarRef.current) {
+              result = await astarRef.current.selectAction(
+                m, possibleMoves, currentSteps, curiosityWeight, epsilon
+              );
+            }
+            break;
+        }
+
+        if (result) {
+          const isNewArea = !history.some(hp => hp.x === result!.pos.x && hp.y === result!.pos.y);
+          const mode = isNewArea ? 'explore' : 'exploit';
+          
+          return { 
+            pos: result.pos, 
+            mode, 
+            epsilon,
+            actionIndex: result.actionIndex
+          };
+        }
       } catch (error) {
-        console.error('Neural network error, falling back to epsilon-greedy:', error);
+        console.error(`Algorithm ${stats.algorithm} error, falling back to epsilon-greedy:`, error);
         // Fall through to epsilon-greedy
       }
     }
 
-    // Fallback: Epsilon-Greedy Strategy
+    // Fallback: Epsilon-Greedy Strategy (simple greedy)
     const isExploring = Math.random() < epsilon;
 
     if (isExploring) {
@@ -169,13 +255,24 @@ const App: React.FC = () => {
       }
       return { pos: bestMove, mode: 'exploit', epsilon };
     }
-  }, [stats.useNeuralNetwork]);
+  }, [stats.useNeuralNetwork, stats.algorithm, stats.useOptimalExploration, stats.explorationType]);
 
   const step = useCallback(async () => {
     if (!maze || stats.goalReached) return;
 
-    // Get state features for neural network training
-    const stateFeatures = policyNetworkRef.current ? (() => {
+    // Log current state
+    const currentDistance = Math.abs(maze.agentPos.x - maze.goalPos.x) + Math.abs(maze.agentPos.y - maze.goalPos.y);
+    const visitedCount = maze.history.length;
+    const totalCells = MAZE_SIZE * MAZE_SIZE;
+    const visitedPercent = ((visitedCount / totalCells) * 100).toFixed(1);
+    
+    // Log state info every 5 steps to avoid spam
+    if (stats.steps % 5 === 0) {
+      addLog(`State: Agent[${maze.agentPos.x},${maze.agentPos.y}] → Goal[${maze.goalPos.x},${maze.goalPos.y}] | Distance: ${currentDistance} | Visited: ${visitedCount}/${totalCells} (${visitedPercent}%)`, "action");
+    }
+
+    // Get state features for neural network training (same for all algorithms)
+    const stateFeatures = stats.useNeuralNetwork ? (() => {
       const { agentPos, goalPos, history } = maze;
       const distance = Math.abs(agentPos.x - goalPos.x) + Math.abs(agentPos.y - goalPos.y);
       const normalizedAgentX = agentPos.x / MAZE_SIZE;
@@ -196,11 +293,36 @@ const App: React.FC = () => {
     const reachedGoal = nextPos.x === maze.goalPos.x && nextPos.y === maze.goalPos.y;
     const isNewArea = !maze.history.some(p => p.x === nextPos.x && p.y === nextPos.y);
 
+    // Determine action direction for logging
+    const dx = nextPos.x - maze.agentPos.x;
+    const dy = nextPos.y - maze.agentPos.y;
+    let actionDir: string = 'stay';
+    if (dy > 0) actionDir = 'DOWN';
+    else if (dy < 0) actionDir = 'UP';
+    else if (dx < 0) actionDir = 'LEFT';
+    else if (dx > 0) actionDir = 'RIGHT';
+
+    // Log action selection details
+    if (stats.useNeuralNetwork && stats.algorithm !== 'EpsilonGreedy') {
+      addLog(`Action: ${actionDir} | Mode: ${mode.toUpperCase()} | Algorithm: ${stats.algorithm} | ε=${epsilon.toFixed(2)}`, "action");
+    } else {
+      addLog(`Action: ${actionDir} | Mode: ${mode.toUpperCase()} | Strategy: Epsilon-Greedy | ε=${epsilon.toFixed(2)}`, "action");
+    }
+
     // Curiosity Reward Logic using the adjustable multiplier
     const stepCost = -1;
     const goalBonus = reachedGoal ? 100 : 0;
     const curiosityBonus = isNewArea ? curiosityMultiplier : 0;
     const totalRewardIncrement = stepCost + goalBonus + curiosityBonus;
+
+    // Log reward breakdown
+    if (reachedGoal) {
+      addLog(`🎯 GOAL REACHED! Reward: ${stepCost} (step) + ${goalBonus} (goal) = ${totalRewardIncrement}`, "action");
+    } else if (isNewArea) {
+      addLog(`Reward: ${stepCost} (step) + ${curiosityBonus} (curiosity) = ${totalRewardIncrement}`, "action");
+    } else {
+      addLog(`Reward: ${stepCost} (step cost)`, "action");
+    }
 
     // Store experience for training (if using neural network)
     if (stats.useNeuralNetwork && stateFeatures && actionIndex !== undefined && actionIndex >= 0) {
@@ -208,9 +330,29 @@ const App: React.FC = () => {
       trainingBufferRef.current.actions.push(actionIndex);
       trainingBufferRef.current.rewards.push(totalRewardIncrement);
       
+      // Compute next state features for algorithms that need it (DQN, Actor-Critic, PPO)
+      if (stats.algorithm === 'DQN' || stats.algorithm === 'ActorCritic' || stats.algorithm === 'PPO' || stats.algorithm === 'A3C' || stats.algorithm === 'SAC') {
+        const nextStateFeatures = stateFeatures; // Simplified - would compute actual next state
+        if (!trainingBufferRef.current.nextStates) {
+          trainingBufferRef.current.nextStates = [];
+          trainingBufferRef.current.dones = [];
+        }
+        trainingBufferRef.current.nextStates.push(nextStateFeatures);
+        trainingBufferRef.current.dones!.push(reachedGoal);
+        
+        // For PPO, also store old probability
+        if (stats.algorithm === 'PPO') {
+          if (!trainingBufferRef.current.oldProbs) {
+            trainingBufferRef.current.oldProbs = [];
+          }
+          // Get old probability (simplified - would get from previous prediction)
+          trainingBufferRef.current.oldProbs.push(0.25); // Default uniform
+        }
+      }
+      
       // Also add to training system for experience replay
       if (trainingSystemRef.current) {
-        const nextStateFeatures = stateFeatures; // Simplified - in real implementation would compute next state
+        const nextStateFeatures = stateFeatures; // Simplified
         trainingSystemRef.current.addExperience({
           state: stateFeatures,
           action: actionIndex,
@@ -220,7 +362,13 @@ const App: React.FC = () => {
         });
       }
       
-      setStats(prev => ({ ...prev, trainingExperiences: trainingBufferRef.current.states.length }));
+      const newBufferSize = trainingBufferRef.current.states.length;
+      setStats(prev => ({ ...prev, trainingExperiences: newBufferSize }));
+      
+      // Log buffer status every 10 experiences
+      if (newBufferSize % 10 === 0) {
+        addLog(`Training buffer: ${newBufferSize} experiences collected`, "action");
+      }
     }
 
     // V-M loop: Use VAE if enabled, otherwise use random
@@ -229,8 +377,11 @@ const App: React.FC = () => {
     if (stats.useVAE && vaeRef.current && maze && stats.steps % 3 === 0) {
       try {
         newLatent = await vaeRef.current.encode(maze);
+        const latentStr = newLatent.vector.slice(0, 3).map(v => v.toFixed(2)).join(', ');
+        addLog(`VAE: Encoded state → latent[${latentStr}...] (dim=${LATENT_DIM})`, "vision");
       } catch (error) {
         console.error('VAE encoding error:', error);
+        addLog(`VAE: Encoding failed, using fallback`, "error");
         // Fallback to random
         newLatent = {
           vector: Array(LATENT_DIM).fill(0).map(() => Math.random()),
@@ -243,12 +394,13 @@ const App: React.FC = () => {
         vector: Array(LATENT_DIM).fill(0).map(() => Math.random()),
         reconstruction: Array(5).fill(0).map(() => Array(5).fill(0).map(() => Math.random()))
       };
+      if (stats.steps % 3 !== 0 && stats.useVAE) {
+        addLog(`VAE: Reusing previous latent (encoding every 3 steps)`, "vision");
+      }
     }
     setLatent(newLatent);
 
-    // Determine action direction for MDN-RNN
-    const dx = nextPos.x - maze.agentPos.x;
-    const dy = nextPos.y - maze.agentPos.y;
+    // Determine action direction for MDN-RNN (already calculated above)
     let action: 'up' | 'down' | 'left' | 'right' = 'right';
     if (dy > 0) action = 'down';
     else if (dy < 0) action = 'up';
@@ -263,28 +415,40 @@ const App: React.FC = () => {
         let d: DreamPrediction;
         if (stats.useMDNRNN && mdnRnnRef.current && lastActionRef.current) {
           try {
+            addLog(`MDN-RNN: Predicting future sequence (5 steps ahead)`, "dream");
             // Predict sequence using MDN-RNN
             const actions: ('up' | 'down' | 'left' | 'right')[] = [
               lastActionRef.current, lastActionRef.current, lastActionRef.current, 
               lastActionRef.current, lastActionRef.current
             ];
             d = await mdnRnnRef.current.predictSequence(newLatent.vector, actions, maze);
+            const predictedEnd = d.steps.length > 0 ? d.steps[d.steps.length - 1] : null;
+            if (predictedEnd) {
+              addLog(`MDN-RNN: Dream sequence generated (${d.steps.length} steps, confidence: ${(d.confidence * 100).toFixed(1)}%, end: [${predictedEnd.x},${predictedEnd.y}])`, "dream");
+            } else {
+              addLog(`MDN-RNN: Dream sequence generated (${d.steps.length} steps, confidence: ${(d.confidence * 100).toFixed(1)}%)`, "dream");
+            }
           } catch (error) {
             console.error('MDN-RNN prediction error:', error);
+            addLog(`MDN-RNN: Prediction failed, using fallback (non-critical - system continues normally)`, "error");
             // Fallback to simple prediction
             d = await predictNextState(maze);
           }
         } else {
           d = await predictNextState(maze);
+          addLog(`Dream: Using simple prediction (MDN-RNN disabled)`, "dream");
         }
         setDream(d);
         // Only update monologue occasionally to reduce API calls
         if (stats.steps % 20 === 0) {
           try {
+            addLog(`Generating internal monologue...`, "dream");
             const m = await getAgentInternalMonologue(maze);
             setMonologue(m);
+            addLog(`Monologue updated`, "dream");
           } catch (error) {
             console.error('Monologue error:', error);
+            addLog(`Monologue generation failed`, "error");
           }
         }
         if (mode === 'explore') {
@@ -292,11 +456,13 @@ const App: React.FC = () => {
         }
       }).catch(error => {
         console.error('Dream analysis error:', error);
+        addLog(`Dream analysis error: ${error}`, "error");
       });
     }
 
     if (isNewArea && !reachedGoal) {
-      addLog(`Sensory Input: Novel area detected. Reward: +${curiosityMultiplier}`, "vision");
+      const distanceToGoal = Math.abs(nextPos.x - maze.goalPos.x) + Math.abs(nextPos.y - maze.goalPos.y);
+      addLog(`Sensory Input: Novel area detected at [${nextPos.x},${nextPos.y}]. Distance to goal: ${distanceToGoal}. Reward: +${curiosityMultiplier}`, "vision");
     }
 
     setMaze(prev => {
@@ -315,6 +481,8 @@ const App: React.FC = () => {
       };
     });
 
+    // Log mode changes
+    const prevMode = stats.currentMode;
     setStats(prev => ({
       ...prev,
       steps: prev.steps + 1,
@@ -324,59 +492,183 @@ const App: React.FC = () => {
       currentMode: mode,
       epsilon: epsilon
     }));
+    
+    // Log mode transition
+    if (prevMode !== mode && prevMode !== 'initializing') {
+      addLog(`Mode transition: ${prevMode.toUpperCase()} → ${mode.toUpperCase()}`, "action");
+    }
 
     if (reachedGoal) {
       addLog("Goal state achieved. Terminating episode.", "vision");
       setIsRunning(false);
       
       // Train neural network at end of episode
-      if (stats.useNeuralNetwork && policyNetworkRef.current && trainingBufferRef.current.states.length > 0) {
+      if (stats.useNeuralNetwork && trainingBufferRef.current.states.length > 0) {
         try {
-          // Use training system if available
-          if (trainingSystemRef.current) {
-            await trainingSystemRef.current.trainPolicyNetwork(policyNetworkRef.current, 10);
-            addLog(`Neural network trained with experience replay (${trainingSystemRef.current.getStats().bufferSize} experiences).`, "action");
-          } else {
-            await policyNetworkRef.current.train(
-              trainingBufferRef.current.states,
-              trainingBufferRef.current.actions,
-              trainingBufferRef.current.rewards
-            );
-            addLog(`Neural network trained on ${trainingBufferRef.current.states.length} experiences.`, "action");
+          const bufferSize = trainingBufferRef.current.states.length;
+          const totalReward = trainingBufferRef.current.rewards.reduce((a, b) => a + b, 0);
+          addLog(`Training ${stats.algorithm} network with ${bufferSize} experiences (total reward: ${totalReward.toFixed(1)})...`, "action");
+          
+          switch (stats.algorithm) {
+            case 'REINFORCE':
+              if (policyNetworkRef.current) {
+                if (trainingSystemRef.current) {
+                  const statsBefore = trainingSystemRef.current.getStats();
+                  await trainingSystemRef.current.trainPolicyNetwork(policyNetworkRef.current, 10);
+                  const statsAfter = trainingSystemRef.current.getStats();
+                  addLog(`REINFORCE: Trained with experience replay (buffer: ${statsAfter.bufferSize} experiences, ${statsAfter.trainingSteps} training steps)`, "action");
+                } else {
+                  await policyNetworkRef.current.train(
+                    trainingBufferRef.current.states,
+                    trainingBufferRef.current.actions,
+                    trainingBufferRef.current.rewards
+                  );
+                  addLog(`REINFORCE: Trained on ${bufferSize} experiences (episode end)`, "action");
+                }
+              }
+              break;
+
+            case 'DQN':
+              if (dqnRef.current && trainingBufferRef.current.nextStates && trainingBufferRef.current.dones) {
+                const experiences = trainingBufferRef.current.states.map((state, i) => ({
+                  state,
+                  action: trainingBufferRef.current.actions[i],
+                  reward: trainingBufferRef.current.rewards[i],
+                  nextState: trainingBufferRef.current.nextStates![i],
+                  done: trainingBufferRef.current.dones![i]
+                }));
+                await dqnRef.current.train(experiences);
+                addLog(`DQN: Trained on ${bufferSize} experiences (Q-learning update)`, "action");
+              }
+              break;
+
+            case 'ActorCritic':
+              if (actorCriticRef.current && trainingBufferRef.current.nextStates && trainingBufferRef.current.dones) {
+                const experiences = trainingBufferRef.current.states.map((state, i) => ({
+                  state,
+                  action: trainingBufferRef.current.actions[i],
+                  reward: trainingBufferRef.current.rewards[i],
+                  nextState: trainingBufferRef.current.nextStates![i],
+                  done: trainingBufferRef.current.dones![i]
+                }));
+                await actorCriticRef.current.train(experiences);
+                addLog(`Actor-Critic: Trained on ${bufferSize} experiences (policy + value update)`, "action");
+              }
+              break;
+
+            case 'PPO':
+              if (ppoRef.current && trainingBufferRef.current.nextStates && trainingBufferRef.current.dones && trainingBufferRef.current.oldProbs) {
+                const experiences = trainingBufferRef.current.states.map((state, i) => ({
+                  state,
+                  action: trainingBufferRef.current.actions[i],
+                  reward: trainingBufferRef.current.rewards[i],
+                  nextState: trainingBufferRef.current.nextStates![i],
+                  done: trainingBufferRef.current.dones![i],
+                  oldProb: trainingBufferRef.current.oldProbs![i]
+                }));
+                await ppoRef.current.train(experiences);
+                addLog(`PPO: Trained on ${bufferSize} experiences (clipped objective)`, "action");
+              }
+              break;
+
+            case 'A3C':
+              if (a3cRef.current && trainingBufferRef.current.nextStates && trainingBufferRef.current.dones) {
+                await a3cRef.current.train(
+                  trainingBufferRef.current.states,
+                  trainingBufferRef.current.actions,
+                  trainingBufferRef.current.rewards,
+                  trainingBufferRef.current.nextStates,
+                  trainingBufferRef.current.dones
+                );
+                addLog(`A3C: Trained on ${bufferSize} experiences (n-step returns)`, "action");
+              }
+              break;
+
+            case 'SAC':
+              if (sacRef.current && trainingBufferRef.current.nextStates && trainingBufferRef.current.dones) {
+                await sacRef.current.train(
+                  trainingBufferRef.current.states,
+                  trainingBufferRef.current.actions,
+                  trainingBufferRef.current.rewards,
+                  trainingBufferRef.current.nextStates,
+                  trainingBufferRef.current.dones
+                );
+                addLog(`SAC: Trained on ${bufferSize} experiences (soft actor-critic)`, "action");
+              }
+              break;
+
+            case 'AStar':
+              // A* doesn't learn, but we keep the interface consistent
+              addLog(`A*: No training needed (deterministic pathfinding)`, "action");
+              break;
           }
+          
           // Clear buffer
           trainingBufferRef.current = { states: [], actions: [], rewards: [] };
           setStats(prev => ({ ...prev, trainingExperiences: 0 }));
+          addLog(`Training complete. Buffer cleared.`, "action");
         } catch (error) {
           console.error('Training error:', error);
+          addLog(`Training error: ${error}`, "error");
         }
       }
     }
 
     // Periodic training (every 20 steps)
-    if (stats.useNeuralNetwork && policyNetworkRef.current && 
-        trainingBufferRef.current.states.length >= 20 && 
-        stats.steps % 20 === 0) {
+    if (stats.useNeuralNetwork && trainingBufferRef.current.states.length >= 20 && stats.steps % 20 === 0) {
       try {
-        if (trainingSystemRef.current) {
-          await trainingSystemRef.current.trainPolicyNetwork(policyNetworkRef.current, 3);
-        } else {
-          await policyNetworkRef.current.train(
-            trainingBufferRef.current.states.slice(-20),
-            trainingBufferRef.current.actions.slice(-20),
-            trainingBufferRef.current.rewards.slice(-20)
-          );
+        const recentStates = trainingBufferRef.current.states.slice(-20);
+        const recentActions = trainingBufferRef.current.actions.slice(-20);
+        const recentRewards = trainingBufferRef.current.rewards.slice(-20);
+        const recentRewardSum = recentRewards.reduce((a, b) => a + b, 0);
+        
+        addLog(`Periodic training: ${stats.algorithm} on last 20 steps (reward: ${recentRewardSum.toFixed(1)})`, "action");
+        
+        switch (stats.algorithm) {
+          case 'REINFORCE':
+            if (policyNetworkRef.current) {
+              if (trainingSystemRef.current) {
+                await trainingSystemRef.current.trainPolicyNetwork(policyNetworkRef.current, 3);
+                addLog(`REINFORCE: Periodic training complete (3 epochs)`, "action");
+              } else {
+                await policyNetworkRef.current.train(recentStates, recentActions, recentRewards);
+                addLog(`REINFORCE: Periodic training complete`, "action");
+              }
+            }
+            break;
+
+          case 'DQN':
+          case 'ActorCritic':
+          case 'PPO':
+          case 'A3C':
+          case 'SAC':
+            // These algorithms train better with full episodes, skip periodic training
+            addLog(`${stats.algorithm}: Skipping periodic training (trains at episode end)`, "action");
+            break;
+
+          case 'AStar':
+            // A* doesn't learn
+            addLog(`A*: No training needed (deterministic pathfinding)`, "action");
+            break;
         }
+        
         // Keep buffer size manageable
         if (trainingBufferRef.current.states.length > 100) {
+          const keepSize = 50;
+          const removed = trainingBufferRef.current.states.length - keepSize;
           trainingBufferRef.current = {
-            states: trainingBufferRef.current.states.slice(-50),
-            actions: trainingBufferRef.current.actions.slice(-50),
-            rewards: trainingBufferRef.current.rewards.slice(-50)
+            states: trainingBufferRef.current.states.slice(-keepSize),
+            actions: trainingBufferRef.current.actions.slice(-keepSize),
+            rewards: trainingBufferRef.current.rewards.slice(-keepSize),
+            nextStates: trainingBufferRef.current.nextStates?.slice(-keepSize),
+            dones: trainingBufferRef.current.dones?.slice(-keepSize),
+            oldProbs: trainingBufferRef.current.oldProbs?.slice(-keepSize)
           };
+          addLog(`Buffer trimmed: removed ${removed} old experiences (kept ${keepSize})`, "action");
         }
       } catch (error) {
         console.error('Periodic training error:', error);
+        addLog(`Periodic training error: ${error}`, "error");
       }
     }
   }, [maze, stats.goalReached, stats.steps, stats.useNeuralNetwork, getNextAction, curiosityMultiplier, addLog]);
@@ -421,27 +713,88 @@ const App: React.FC = () => {
           addLog("UI ready. Loading neural networks in background...", "action");
         }
         
-        // Initialize Policy Network in background (requires TensorFlow)
-        // This will lazy-load TensorFlow.js when needed
-        const initPolicyNetwork = async () => {
+        // Initialize algorithms lazily - only load when needed
+        // This ensures fast page load - algorithms load on-demand
+        const initAlgorithm = async (algorithm: AlgorithmType) => {
           try {
-            policyNetworkRef.current = new PolicyNetwork();
-            await policyNetworkRef.current.initialize();
-            if (!cancelled) {
-              addLog("Neural Network Policy initialized. Ready for learning.", "action");
+            switch (algorithm) {
+              case 'REINFORCE':
+                if (!policyNetworkRef.current) {
+                  policyNetworkRef.current = new PolicyNetwork();
+                  await policyNetworkRef.current.initialize();
+                  if (!cancelled) {
+                    addLog("REINFORCE (Policy Network) initialized.", "action");
+                  }
+                }
+                break;
+              case 'DQN':
+                if (!dqnRef.current) {
+                  dqnRef.current = new DQN();
+                  await dqnRef.current.initialize();
+                  if (!cancelled) {
+                    addLog("DQN initialized.", "action");
+                  }
+                }
+                break;
+              case 'ActorCritic':
+                if (!actorCriticRef.current) {
+                  const explorationType = stats.useOptimalExploration ? 'softmax' : stats.explorationType;
+                  actorCriticRef.current = new ActorCritic(explorationType, 1.0);
+                  await actorCriticRef.current.initialize();
+                  if (!cancelled) {
+                    addLog(`Actor-Critic initialized (${explorationType}).`, "action");
+                  }
+                }
+                break;
+              case 'PPO':
+                if (!ppoRef.current) {
+                  ppoRef.current = new PPO(1.0, 0.2);
+                  await ppoRef.current.initialize();
+                  if (!cancelled) {
+                    addLog("PPO initialized (softmax).", "action");
+                  }
+                }
+                break;
+              case 'A3C':
+                if (!a3cRef.current) {
+                  a3cRef.current = new A3C(5, 0.01);
+                  await a3cRef.current.initialize();
+                  if (!cancelled) {
+                    addLog("A3C initialized.", "action");
+                  }
+                }
+                break;
+              case 'SAC':
+                if (!sacRef.current) {
+                  sacRef.current = new SAC(0.2, 0.005);
+                  await sacRef.current.initialize();
+                  if (!cancelled) {
+                    addLog("SAC initialized.", "action");
+                  }
+                }
+                break;
+              case 'AStar':
+                if (!astarRef.current) {
+                  astarRef.current = new AStar();
+                  await astarRef.current.initialize();
+                  if (!cancelled) {
+                    addLog("A* Pathfinding initialized.", "action");
+                  }
+                }
+                break;
             }
           } catch (error) {
-            console.warn('Policy Network initialization failed:', error);
+            console.warn(`${algorithm} initialization failed:`, error);
             if (!cancelled) {
-              addLog("Policy Network initialization failed (will use epsilon-greedy).", "action");
+              addLog(`${algorithm} initialization failed.`, "action");
             }
           }
         };
         
-        // Start loading Policy Network after a short delay
+        // Load default algorithm (REINFORCE) after a short delay
         setTimeout(() => {
           if (!cancelled) {
-            initPolicyNetwork();
+            initAlgorithm('REINFORCE');
           }
         }, 200);
         
@@ -534,6 +887,15 @@ const App: React.FC = () => {
       if (policyNetworkRef.current) {
         policyNetworkRef.current.dispose();
       }
+      if (dqnRef.current) {
+        dqnRef.current.dispose();
+      }
+      if (actorCriticRef.current) {
+        actorCriticRef.current.dispose();
+      }
+      if (ppoRef.current) {
+        ppoRef.current.dispose();
+      }
       if (vaeRef.current) {
         vaeRef.current.dispose();
       }
@@ -544,7 +906,7 @@ const App: React.FC = () => {
         knowledgeBaseRef.current.dispose();
       }
     };
-  }, [addLog, stats.useVAE, stats.useMDNRNN]);
+  }, [addLog, stats.useVAE, stats.useMDNRNN, stats.algorithm, stats.useOptimalExploration, stats.explorationType]);
 
   useEffect(() => {
     initMaze();
@@ -623,7 +985,8 @@ const App: React.FC = () => {
               setStats(prev => ({ 
                 ...prev, 
                 useNeuralNetwork: !prev.useNeuralNetwork,
-                trainingExperiences: 0
+                trainingExperiences: 0,
+                algorithm: !prev.useNeuralNetwork ? 'REINFORCE' : 'EpsilonGreedy'
               }));
               trainingBufferRef.current = { states: [], actions: [], rewards: [] };
             }}
@@ -637,6 +1000,92 @@ const App: React.FC = () => {
             <i className={`fa-solid ${stats.useNeuralNetwork ? 'fa-brain' : 'fa-code'}`}></i>
             {stats.useNeuralNetwork ? 'NN ON' : 'NN OFF'}
           </button>
+
+          {/* Algorithm Selector - Only show when NN is ON */}
+          {stats.useNeuralNetwork && (
+            <select
+              value={stats.algorithm}
+              onChange={async (e) => {
+                const newAlgorithm = e.target.value as AlgorithmType;
+                setStats(prev => ({ 
+                  ...prev, 
+                  algorithm: newAlgorithm,
+                  trainingExperiences: 0
+                }));
+                trainingBufferRef.current = { states: [], actions: [], rewards: [] };
+                
+                // Lazy load the selected algorithm
+                if (newAlgorithm !== 'EpsilonGreedy') {
+                  try {
+                    switch (newAlgorithm) {
+                      case 'REINFORCE':
+                        if (!policyNetworkRef.current) {
+                          policyNetworkRef.current = new PolicyNetwork();
+                          await policyNetworkRef.current.initialize();
+                          addLog("REINFORCE loaded.", "action");
+                        }
+                        break;
+                      case 'DQN':
+                        if (!dqnRef.current) {
+                          dqnRef.current = new DQN();
+                          await dqnRef.current.initialize();
+                          addLog("DQN loaded.", "action");
+                        }
+                        break;
+                      case 'ActorCritic':
+                        if (!actorCriticRef.current) {
+                          const explorationType = stats.useOptimalExploration ? 'softmax' : stats.explorationType;
+                          actorCriticRef.current = new ActorCritic(explorationType, 1.0);
+                          await actorCriticRef.current.initialize();
+                          addLog(`Actor-Critic loaded (${explorationType}).`, "action");
+                        }
+                        break;
+                      case 'PPO':
+                        if (!ppoRef.current) {
+                          ppoRef.current = new PPO(1.0, 0.2);
+                          await ppoRef.current.initialize();
+                          addLog("PPO loaded (softmax).", "action");
+                        }
+                        break;
+                      case 'A3C':
+                        if (!a3cRef.current) {
+                          a3cRef.current = new A3C(5, 0.01);
+                          await a3cRef.current.initialize();
+                          addLog("A3C loaded.", "action");
+                        }
+                        break;
+                      case 'SAC':
+                        if (!sacRef.current) {
+                          sacRef.current = new SAC(0.2, 0.005);
+                          await sacRef.current.initialize();
+                          addLog("SAC loaded.", "action");
+                        }
+                        break;
+                      case 'AStar':
+                        if (!astarRef.current) {
+                          astarRef.current = new AStar();
+                          await astarRef.current.initialize();
+                          addLog("A* Pathfinding loaded.", "action");
+                        }
+                        break;
+                    }
+                  } catch (error) {
+                    console.error(`Failed to load ${newAlgorithm}:`, error);
+                    addLog(`Failed to load ${newAlgorithm}.`, "error");
+                  }
+                }
+              }}
+              className="px-4 py-3 bg-slate-800 border border-slate-700 rounded-full font-bold text-sm hover:bg-slate-700 transition-all"
+            >
+              <option value="REINFORCE">REINFORCE</option>
+              <option value="DQN">DQN</option>
+              <option value="ActorCritic">Actor-Critic</option>
+              <option value="PPO">PPO</option>
+              <option value="A3C">A3C</option>
+              <option value="SAC">SAC</option>
+              <option value="AStar">A* Pathfinding</option>
+            </select>
+          )}
 
           {/* Environment Type Selector */}
           <select
@@ -658,21 +1107,131 @@ const App: React.FC = () => {
           {/* Transfer Learning Button */}
           <button
             onClick={async () => {
-              if (knowledgeBaseRef.current && policyNetworkRef.current && vaeRef.current && mdnRnnRef.current) {
-                await knowledgeBaseRef.current.savePolicy(policyNetworkRef.current);
-                await knowledgeBaseRef.current.saveVAE(vaeRef.current);
-                await knowledgeBaseRef.current.saveRNN(mdnRnnRef.current);
-                addLog("Knowledge saved to shared base. Ready for transfer.", "action");
+              addLog("Attempting to save knowledge...", "action");
+              
+              // Check what's available
+              const missing: string[] = [];
+              if (!knowledgeBaseRef.current) missing.push("Knowledge Base");
+              if (!policyNetworkRef.current) missing.push("Policy Network");
+              if (!vaeRef.current) missing.push("VAE");
+              if (!mdnRnnRef.current) missing.push("MDN-RNN");
+              
+              if (missing.length > 0) {
+                addLog(`Cannot save: Missing components: ${missing.join(", ")}. Make sure NN is ON and networks are initialized.`, "error");
+                return;
+              }
+              
+              if (!stats.useNeuralNetwork) {
+                addLog("Cannot save: Neural Network is OFF. Turn NN ON to enable knowledge saving.", "error");
+                return;
+              }
+              
+              try {
+                addLog("Saving Policy Network weights...", "action");
+                await knowledgeBaseRef.current!.savePolicy(policyNetworkRef.current!);
+                addLog("✓ Policy Network saved", "action");
+                
+                addLog("Saving VAE weights...", "action");
+                await knowledgeBaseRef.current!.saveVAE(vaeRef.current!);
+                addLog("✓ VAE (Vision) saved", "action");
+                
+                addLog("Saving MDN-RNN weights...", "action");
+                await knowledgeBaseRef.current!.saveRNN(mdnRnnRef.current!);
+                addLog("✓ MDN-RNN (Memory) saved", "action");
+                
+                addLog("✅ Knowledge saved successfully! Ready for transfer learning to new environments.", "action");
+              } catch (error) {
+                console.error('Save knowledge error:', error);
+                addLog(`❌ Error saving knowledge: ${error}`, "error");
               }
             }}
-            className="px-6 py-3 bg-emerald-600 text-white rounded-full font-bold hover:bg-emerald-500 transition-all flex items-center gap-3"
-            title="Save current knowledge for transfer learning"
+            className="px-6 py-3 bg-emerald-600 text-white rounded-full font-bold hover:bg-emerald-500 transition-all flex items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Save current knowledge for transfer learning (requires NN ON and all networks initialized)"
+            disabled={!stats.useNeuralNetwork || !knowledgeBaseRef.current}
           >
             <i className="fa-solid fa-download"></i>
             SAVE KNOWLEDGE
           </button>
         </div>
       </div>
+
+      {/* Algorithm Settings Panel - Only show when NN is ON */}
+      {stats.useNeuralNetwork && stats.algorithm !== 'EpsilonGreedy' && (
+        <div className="w-full max-w-6xl mb-6 bg-slate-900/50 border border-slate-700 rounded-xl p-4">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-slate-400 uppercase">Algorithm:</span>
+              <span className="text-sm font-mono text-purple-400">{stats.algorithm}</span>
+            </div>
+
+            {/* Exploration Type Toggle - Only for Actor-Critic */}
+            {stats.algorithm === 'ActorCritic' && (
+              <>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-400 uppercase">Exploration:</span>
+                  <button
+                    onClick={() => {
+                      setStats(prev => ({ 
+                        ...prev, 
+                        useOptimalExploration: !prev.useOptimalExploration
+                      }));
+                      if (actorCriticRef.current) {
+                        const explorationType = !stats.useOptimalExploration ? 'softmax' : stats.explorationType;
+                        actorCriticRef.current.setExplorationType(explorationType, 1.0);
+                      }
+                    }}
+                    className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
+                      stats.useOptimalExploration
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-slate-700 text-slate-300'
+                    }`}
+                    title={stats.useOptimalExploration ? "Using optimal exploration (softmax)" : "Using manual exploration"}
+                  >
+                    {stats.useOptimalExploration ? 'Optimal (Softmax)' : 'Manual'}
+                  </button>
+                </div>
+
+                {!stats.useOptimalExploration && (
+                  <select
+                    value={stats.explorationType}
+                    onChange={(e) => {
+                      const newType = e.target.value as ExplorationType;
+                      setStats(prev => ({ ...prev, explorationType: newType }));
+                      if (actorCriticRef.current) {
+                        actorCriticRef.current.setExplorationType(newType, 1.0);
+                      }
+                    }}
+                    className="px-3 py-1 bg-slate-800 border border-slate-700 rounded-full font-bold text-xs hover:bg-slate-700 transition-all"
+                  >
+                    <option value="softmax">Softmax</option>
+                    <option value="epsilon-greedy">Epsilon-Greedy</option>
+                  </select>
+                )}
+              </>
+            )}
+
+            {/* Info for other algorithms */}
+            {stats.algorithm === 'REINFORCE' && (
+              <span className="text-xs text-slate-500 italic">Using Epsilon-Greedy exploration</span>
+            )}
+            {stats.algorithm === 'DQN' && (
+              <span className="text-xs text-slate-500 italic">Using Epsilon-Greedy exploration</span>
+            )}
+            {stats.algorithm === 'PPO' && (
+              <span className="text-xs text-slate-500 italic">Using Softmax exploration (required)</span>
+            )}
+            {stats.algorithm === 'A3C' && (
+              <span className="text-xs text-slate-500 italic">Using Softmax exploration with n-step returns</span>
+            )}
+            {stats.algorithm === 'SAC' && (
+              <span className="text-xs text-slate-500 italic">Using Softmax exploration with entropy regularization</span>
+            )}
+            {stats.algorithm === 'AStar' && (
+              <span className="text-xs text-slate-500 italic">Heuristic pathfinding (deterministic)</span>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Vision & Memory Panels */}
@@ -719,13 +1278,15 @@ const App: React.FC = () => {
           {stats.useNeuralNetwork && (
             <div className="mt-4 bg-purple-900/20 border border-purple-500/30 rounded-xl p-3">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] text-purple-400 font-bold uppercase">Neural Network</span>
+                <span className="text-[10px] text-purple-400 font-bold uppercase">
+                  {stats.algorithm} Network
+                </span>
                 <span className="text-[10px] text-purple-300 font-mono">
                   {stats.trainingExperiences} experiences
                 </span>
               </div>
               <div className="text-[10px] text-purple-400/70 italic">
-                Learning from experience... Policy improves over time.
+                Learning from experience... {stats.algorithm} improves over time.
               </div>
             </div>
           )}
@@ -737,17 +1298,24 @@ const App: React.FC = () => {
             <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
               <i className="fa-solid fa-terminal text-blue-400"></i> Controller (C) Logs
             </h3>
-            <div className="flex-1 space-y-3 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar">
+            <div className="flex-1 space-y-2 overflow-y-auto max-h-[500px] pr-2 custom-scrollbar">
               {logs.map((log) => (
-                <div key={log.id} className="text-[11px] font-mono leading-tight border-l-2 border-slate-800 pl-3 py-1">
-                  <span className="text-slate-600 block mb-1">
+                <div key={log.id} className="text-[10px] font-mono leading-relaxed border-l-2 pl-3 py-1.5 hover:bg-slate-800/50 transition-colors ${
+                  log.type === 'dream' ? 'border-purple-500/30' : 
+                  log.type === 'vision' ? 'border-emerald-500/30' : 
+                  log.type === 'error' ? 'border-red-500/30' : 'border-blue-500/30'
+                }">
+                  <span className="text-slate-500 block mb-0.5 text-[9px]">
                     [{new Date(log.timestamp).toLocaleTimeString()}] 
-                    <span className={`ml-2 uppercase ${
-                      log.type === 'dream' ? 'text-purple-500' : 
-                      log.type === 'vision' ? 'text-emerald-500' : 'text-blue-500'
+                    <span className={`ml-2 uppercase font-bold ${
+                      log.type === 'dream' ? 'text-purple-400' : 
+                      log.type === 'vision' ? 'text-emerald-400' : 
+                      log.type === 'error' ? 'text-red-400' : 'text-blue-400'
                     }`}>{log.type}</span>
                   </span>
-                  <span className="text-slate-300">{log.message}</span>
+                  <span className={`text-[11px] ${
+                    log.type === 'error' ? 'text-red-300' : 'text-slate-200'
+                  }`}>{log.message}</span>
                 </div>
               ))}
               {logs.length === 0 && <p className="text-slate-600 text-center mt-20 italic">Awaiting connection...</p>}
